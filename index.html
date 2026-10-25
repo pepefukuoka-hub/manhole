@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="マンホール巡り">
+<meta name="theme-color" content="#23272b">
+<title>マンホール巡り</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  /* 鋳鉄のくすみ + 路面の白線の黄色。地図と一覧を縦に積む、片手操作のナビ */
+  :root {
+    --bg: #f2f1ee;
+    --surface: #ffffff;
+    --fg: #1f2326;
+    --muted: #6a7075;
+    --line: #d9d7d2;
+    --accent: #c58a00;
+    --accent-fg: #1a1400;
+    --ok: #2f7d4f;
+    --pin: #c58a00;
+    --pin-done: #2f7d4f;
+    --me: #2b6cdf;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #181b1e; --surface: #23272b; --fg: #eceae5; --muted: #9aa0a5;
+      --line: #353a3f; --accent: #e8b83a; --accent-fg: #1a1400;
+      --ok: #5cc088; --pin: #e8b83a; --pin-done: #5cc088; --me: #6ea2ff;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #181b1e; --surface: #23272b; --fg: #eceae5; --muted: #9aa0a5;
+    --line: #353a3f; --accent: #e8b83a; --accent-fg: #1a1400;
+    --ok: #5cc088; --pin: #e8b83a; --pin-done: #5cc088; --me: #6ea2ff;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.5 -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  header { display: flex; align-items: baseline; justify-content: space-between; padding-top: 8px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .04em; }
+  .count { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+  #nearest {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; display: flex; align-items: center; gap: 14px; min-height: 76px;
+  }
+  #arrow { width: 52px; height: 52px; flex: none; display: grid; place-items: center; }
+  #arrow svg { width: 44px; height: 44px; transition: transform .3s; }
+  #nearest .info { min-width: 0; flex: 1; }
+  #nearest .label { font-size: 12px; color: var(--muted); letter-spacing: .06em; }
+  #nearest .name { font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+  #nearest .dist { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  #map { height: 38vh; min-height: 220px; border-radius: 10px; border: 1px solid var(--line); z-index: 0; }
+
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    font: inherit; border: 1px solid var(--line); background: var(--surface); color: var(--fg);
+    border-radius: 8px; padding: 10px 14px; min-height: 44px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 700; flex: 1; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--me); outline-offset: 2px; }
+
+  #list { display: flex; flex-direction: column; gap: 8px; padding: 0; margin: 0; list-style: none; }
+  #list li {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; display: grid; grid-template-columns: 1fr auto; gap: 4px 10px;
+  }
+  #list .t { font-weight: 600; overflow-wrap: anywhere; }
+  #list .t.done { color: var(--ok); }
+  #list .d { font-variant-numeric: tabular-nums; color: var(--muted); text-align: right; }
+  #list .memo { grid-column: 1 / -1; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  #list .acts { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; }
+  #list .acts button { padding: 6px 12px; min-height: 36px; font-size: 14px; }
+  .empty { color: var(--muted); text-align: center; padding: 20px 8px; }
+
+  #sheet {
+    position: fixed; inset: 0; background: rgba(0,0,0,.5); display: grid; align-items: end; z-index: 1000;
+  }
+  #sheet form {
+    background: var(--surface); border-radius: 16px 16px 0 0; padding: 16px 16px max(16px, env(safe-area-inset-bottom, 0px));
+    display: flex; flex-direction: column; gap: 10px; max-width: 560px; width: 100%; margin: 0 auto;
+  }
+  #sheet h2 { margin: 0; font-size: 17px; }
+  input[type=text], textarea {
+    font: inherit; width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg);
+  }
+  .pos { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #msg { color: var(--muted); font-size: 13px; min-height: 1.2em; }
+  .pin { width: 18px; height: 18px; border-radius: 50%; border: 3px solid var(--pin); background: var(--surface); }
+  .pin.done { border-color: var(--pin-done); background: var(--pin-done); }
+  .me { width: 16px; height: 16px; border-radius: 50%; background: var(--me); border: 3px solid #fff; box-shadow: 0 0 0 2px var(--me); }
+  @media (prefers-reduced-motion: reduce) { #arrow svg { transition: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>マンホール巡り</h1>
+  <span class="count" id="count"></span>
+</header>
+
+<section id="nearest" aria-live="polite">
+  <div id="arrow" aria-hidden="true">
+    <svg viewBox="0 0 48 48" id="arrowSvg"><circle cx="24" cy="24" r="22" fill="none" stroke="var(--line)" stroke-width="2"/><path d="M24 7 L33 30 L24 25 L15 30 Z" fill="var(--accent)"/></svg>
+  </div>
+  <div class="info">
+    <div class="label">いちばん近い未訪問</div>
+    <div class="name" id="nName">現在地を取得中…</div>
+    <div class="dist" id="nDist"></div>
+  </div>
+</section>
+
+<div id="map" role="application" aria-label="地図"></div>
+
+<div class="row">
+  <button class="primary" id="addBtn">いまここを登録</button>
+  <button id="locBtn">現在地へ</button>
+</div>
+<div id="msg"></div>
+
+<ul id="list"></ul>
+
+<div class="row">
+  <button id="exportBtn">バックアップを保存</button>
+  <button id="importBtn">読み込み</button>
+  <input type="file" id="importFile" accept="application/json" hidden>
+</div>
+
+<div id="sheet" hidden>
+  <form id="form">
+    <h2>マンホールを登録</h2>
+    <label for="fName">名前(例:○○市 ポケモン)</label>
+    <input type="text" id="fName" required maxlength="60" autocomplete="off">
+    <label for="fMemo">メモ</label>
+    <textarea id="fMemo" rows="2" maxlength="200"></textarea>
+    <div class="pos" id="fPos"></div>
+    <div class="row">
+      <button type="button" id="cancelBtn">キャンセル</button>
+      <button type="submit" class="primary">登録</button>
+    </div>
+  </form>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function () {
+  const KEY = 'manhole.spots.v1';
+  const $ = (id) => document.getElementById(id);
+  let spots = load();
+  let me = null;            // {lat, lng, acc}
+  let heading = null;
+  let map, meMarker, markers = {};
+  let draft = null;
+
+  function load() {
+    try { const v = JSON.parse(localStorage.getItem(KEY) || '[]'); return Array.isArray(v) ? v : []; }
+    catch (e) { return []; }
+  }
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(spots)); } catch (e) { say('保存できませんでした。バックアップを保存してください。'); } }
+  function say(t) { $('msg').textContent = t; }
+
+  function dist(a, b) {
+    const R = 6371000, r = Math.PI / 180;
+    const dLat = (b.lat - a.lat) * r, dLng = (b.lng - a.lng) * r;
+    const x = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(x));
+  }
+  function bearing(a, b) {
+    const r = Math.PI / 180;
+    const y = Math.sin((b.lng - a.lng) * r) * Math.cos(b.lat * r);
+    const x = Math.cos(a.lat * r) * Math.sin(b.lat * r) - Math.sin(a.lat * r) * Math.cos(b.lat * r) * Math.cos((b.lng - a.lng) * r);
+    return (Math.atan2(y, x) / r + 360) % 360;
+  }
+  const DIRS = ['北', '北東', '東', '南東', '南', '南西', '西', '北西'];
+  const dirName = (deg) => DIRS[Math.round(deg / 45) % 8];
+  function fmt(m) { return m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + ' km'; }
+
+  function initMap() {
+    map = L.map('map', { zoomControl: false }).setView([35.68, 139.76], 15);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '© OpenStreetMap'
+    }).addTo(map);
+    L.control.zoom({ position: 'topright' }).addTo(map);
+  }
+
+  function renderMarkers() {
+    Object.values(markers).forEach((m) => m.remove());
+    markers = {};
+    spots.forEach((s) => {
+      const icon = L.divIcon({ className: '', html: '<div class="pin' + (s.visited ? ' done' : '') + '"></div>', iconSize: [18, 18], iconAnchor: [9, 9] });
+      markers[s.id] = L.marker([s.lat, s.lng], { icon, title: s.name }).addTo(map)
+        .on('click', () => document.getElementById('s-' + s.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    });
+  }
+
+  function render() {
+    const done = spots.filter((s) => s.visited).length;
+    $('count').textContent = spots.length ? done + ' / ' + spots.length + ' 訪問済み' : '';
+    const list = $('list');
+    list.textContent = '';
+    if (!spots.length) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.style.display = 'block';
+      li.textContent = 'まだ登録がありません。マンホールの上で「いまここを登録」を押してください。';
+      list.appendChild(li);
+    }
+    const rows = spots.map((s) => ({ s, d: me ? dist(me, s) : null }));
+    rows.sort((a, b) => (a.s.visited - b.s.visited) || ((a.d ?? 0) - (b.d ?? 0)));
+    rows.forEach(({ s, d }) => {
+      const li = document.createElement('li');
+      li.id = 's-' + s.id;
+      const t = document.createElement('div'); t.className = 't' + (s.visited ? ' done' : ''); t.textContent = (s.visited ? '✓ ' : '') + s.name;
+      const dd = document.createElement('div'); dd.className = 'd'; dd.textContent = d == null ? '' : fmt(d) + ' ' + dirName(bearing(me, s));
+      li.append(t, dd);
+      if (s.memo) { const m = document.createElement('div'); m.className = 'memo'; m.textContent = s.memo; li.appendChild(m); }
+      const acts = document.createElement('div'); acts.className = 'acts';
+      const nav = document.createElement('button'); nav.textContent = 'ナビ';
+      nav.onclick = () => { window.open('https://maps.apple.com/?daddr=' + s.lat + ',' + s.lng + '&dirflg=w', '_blank'); };
+      const go = document.createElement('button'); go.textContent = '地図で見る';
+      go.onclick = () => { map.setView([s.lat, s.lng], 18); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+      const vis = document.createElement('button'); vis.textContent = s.visited ? '未訪問に戻す' : '訪問済みにする';
+      vis.onclick = () => { s.visited = !s.visited; s.at = s.visited ? Date.now() : null; save(); renderAll(); };
+      const del = document.createElement('button'); del.textContent = '削除';
+      del.onclick = () => {
+        if (del.dataset.arm) { spots = spots.filter((x) => x.id !== s.id); save(); renderAll(); }
+        else { del.dataset.arm = '1'; del.textContent = 'もう一度押すと削除'; setTimeout(() => { del.dataset.arm = ''; del.textContent = '削除'; }, 3000); }
+      };
+      acts.append(nav, go, vis, del);
+      li.appendChild(acts);
+      list.appendChild(li);
+    });
+    renderNearest();
+  }
+
+  function renderNearest() {
+    const todo = spots.filter((s) => !s.visited);
+    if (!me) { $('nName').textContent = '現在地を取得中…'; $('nDist').textContent = ''; return; }
+    if (!todo.length) { $('nName').textContent = spots.length ? '全部まわりました' : 'マンホールを登録しましょう'; $('nDist').textContent = ''; return; }
+    let best = null, bd = Infinity;
+    todo.forEach((s) => { const d = dist(me, s); if (d < bd) { bd = d; best = s; } });
+    $('nName').textContent = best.name;
+    $('nDist').textContent = fmt(bd) + (bd < 25 ? '  到着' : '');
+    const b = bearing(me, best);
+    const rot = heading == null ? b : (b - heading + 360) % 360;
+    $('arrowSvg').style.transform = 'rotate(' + rot + 'deg)';
+  }
+
+  function renderAll() { renderMarkers(); render(); }
+
+  function onPos(p) {
+    me = { lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy };
+    if (p.coords.heading != null && !isNaN(p.coords.heading) && (p.coords.speed || 0) > 0.5) heading = p.coords.heading;
+    const ll = [me.lat, me.lng];
+    if (!meMarker) {
+      meMarker = L.marker(ll, { icon: L.divIcon({ className: '', html: '<div class="me"></div>', iconSize: [16, 16], iconAnchor: [8, 8] }), interactive: false, keyboard: false }).addTo(map);
+      map.setView(ll, 17);
+    } else meMarker.setLatLng(ll);
+    say('現在地の精度: 約' + Math.round(me.acc) + ' m');
+    render();
+  }
+  function onErr(e) {
+    const m = { 1: '位置情報が許可されていません。設定 > Safari > 位置情報 で許可してください。', 2: '位置を取得できません。', 3: '位置の取得に時間がかかっています。' };
+    say(m[e.code] || '位置情報エラー');
+    $('nName').textContent = '現在地を取得できません';
+  }
+  function startGps() {
+    if (!navigator.geolocation) { say('この端末は位置情報に対応していません。'); return; }
+    navigator.geolocation.watchPosition(onPos, onErr, { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 });
+  }
+
+  $('locBtn').onclick = () => { if (me) map.setView([me.lat, me.lng], 17); else say('現在地を取得中です。'); };
+  $('addBtn').onclick = () => {
+    if (!me) { say('現在地を取得してから登録してください。'); return; }
+    draft = { lat: me.lat, lng: me.lng, acc: me.acc };
+    $('fPos').textContent = '位置 ' + draft.lat.toFixed(6) + ', ' + draft.lng.toFixed(6) + '(精度 約' + Math.round(draft.acc) + ' m)';
+    $('fName').value = ''; $('fMemo').value = '';
+    $('sheet').hidden = false; $('fName').focus();
+  };
+  $('cancelBtn').onclick = () => { $('sheet').hidden = true; };
+  $('form').onsubmit = (e) => {
+    e.preventDefault();
+    spots.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: $('fName').value.trim(), memo: $('fMemo').value.trim(), lat: draft.lat, lng: draft.lng, visited: true, at: Date.now() });
+    save(); $('sheet').hidden = true; renderAll();
+    say('登録しました。');
+  };
+
+  $('exportBtn').onclick = () => {
+    const blob = new Blob([JSON.stringify(spots, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'manhole-backup.json'; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
+  $('importBtn').onclick = () => $('importFile').click();
+  $('importFile').onchange = (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const v = JSON.parse(r.result);
+        if (!Array.isArray(v)) throw new Error();
+        const ids = new Set(spots.map((s) => s.id));
+        let n = 0;
+        v.forEach((s) => { if (s && typeof s.lat === 'number' && typeof s.lng === 'number' && s.name && !ids.has(s.id)) { spots.push({ id: String(s.id || Date.now() + n), name: String(s.name), memo: String(s.memo || ''), lat: s.lat, lng: s.lng, visited: !!s.visited, at: s.at || null }); n++; } });
+        save(); renderAll(); say(n + ' 件を読み込みました。');
+      } catch (err) { say('読み込めないファイルです。'); }
+    };
+    r.readAsText(f); e.target.value = '';
+  };
+
+  initMap();
+  renderAll();
+  startGps();
+})();
+</script>
+</body>
+</html>
