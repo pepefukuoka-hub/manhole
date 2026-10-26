@@ -102,13 +102,41 @@
   }
   .pos { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
   #msg { color: var(--muted); font-size: 13px; min-height: 1.2em; }
-  .pin { width: 18px; height: 18px; border-radius: 50%; border: 3px solid var(--pin); background: var(--surface); }
-  .pin.done { border-color: var(--pin-done); background: var(--pin-done); }
+  /* マンホールの蓋に見立てたピン。中の丸が点滅する */
+  .pin { position: relative; width: 26px; height: 26px; border-radius: 50%; border: 3px solid var(--pin); background: var(--surface); }
+  .pin::after { content: ""; position: absolute; inset: 4px; border-radius: 50%; background: var(--pin); animation: blink 1.6s ease-in-out infinite; }
+  .pin.done { border-color: var(--pin-done); }
+  .pin.done::after { background: var(--pin-done); }
+  .pin.fresh { animation: ring 1s ease-out 6; }
+  .pin.fresh::after { animation: blink .5s ease-in-out infinite; }
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .1; } }
+  @keyframes ring { 0% { box-shadow: 0 0 0 0 var(--pin-done); } 100% { box-shadow: 0 0 0 22px transparent; } }
   .me { width: 16px; height: 16px; border-radius: 50%; background: var(--me); border: 3px solid #fff; box-shadow: 0 0 0 2px var(--me); }
-  @media (prefers-reduced-motion: reduce) { #arrow svg { transition: none; } }
+
+  #arrive {
+    position: fixed; left: 0; right: 0; top: env(safe-area-inset-top, 0px); z-index: 2000;
+    padding: 12px max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
+    background: var(--ok); color: #fff; display: flex; flex-direction: column; gap: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.35);
+  }
+  #arrive .big { font-size: 22px; font-weight: 800; }
+  #arrive .sub { font-size: 15px; overflow-wrap: anywhere; }
+  #arrive button { background: #fff; color: #14301f; border-color: #fff; font-weight: 700; flex: 1; }
+  @media (prefers-reduced-motion: reduce) {
+    #arrow svg { transition: none; }
+    .pin::after, .pin.fresh, .pin.fresh::after { animation: none; }
+  }
 </style>
 </head>
 <body>
+<div id="arrive" role="alert" hidden>
+  <div class="big">到着しました</div>
+  <div class="sub" id="arriveName"></div>
+  <div class="row">
+    <button id="arriveDone">訪問済みにする</button>
+    <button id="arriveClose">閉じる</button>
+  </div>
+</div>
 <header>
   <h1>マンホール巡り</h1>
   <span class="count" id="count"></span>
@@ -166,6 +194,10 @@
   let heading = null;
   let map, meMarker, markers = {};
   let draft = null;
+  let freshId = null;            // 登録直後のピン(中が速く点滅する)
+  let arriveId = null;           // 到着の案内を出している地点
+  const arrivalShown = new Set(); // 案内済みの地点(閉じたあと再表示しない)
+  const ARRIVE_M = 30;
 
   function load() {
     try { const v = JSON.parse(localStorage.getItem(KEY) || '[]'); return Array.isArray(v) ? v : []; }
@@ -202,7 +234,7 @@
     Object.values(markers).forEach((m) => m.remove());
     markers = {};
     spots.forEach((s) => {
-      const icon = L.divIcon({ className: '', html: '<div class="pin' + (s.visited ? ' done' : '') + '"></div>', iconSize: [18, 18], iconAnchor: [9, 9] });
+      const icon = L.divIcon({ className: '', html: '<div class="pin' + (s.visited ? ' done' : '') + (s.id === freshId ? ' fresh' : '') + '"></div>', iconSize: [26, 26], iconAnchor: [13, 13] });
       markers[s.id] = L.marker([s.lat, s.lng], { icon, title: s.name }).addTo(map)
         .on('click', () => document.getElementById('s-' + s.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
     });
@@ -255,7 +287,14 @@
     let best = null, bd = Infinity;
     todo.forEach((s) => { const d = dist(me, s); if (d < bd) { bd = d; best = s; } });
     $('nName').textContent = best.name;
-    $('nDist').textContent = fmt(bd) + (bd < 25 ? '  到着' : '');
+    $('nDist').textContent = fmt(bd) + (bd < ARRIVE_M ? '  到着' : '');
+    if (bd < ARRIVE_M && !arrivalShown.has(best.id)) {
+      arrivalShown.add(best.id);
+      arriveId = best.id;
+      $('arriveName').textContent = best.name;
+      $('arrive').hidden = false;
+      try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}
+    }
     const b = bearing(me, best);
     const rot = heading == null ? b : (b - heading + 360) % 360;
     $('arrowSvg').style.transform = 'rotate(' + rot + 'deg)';
@@ -295,9 +334,22 @@
   $('cancelBtn').onclick = () => { $('sheet').hidden = true; };
   $('form').onsubmit = (e) => {
     e.preventDefault();
-    spots.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: $('fName').value.trim(), memo: $('fMemo').value.trim(), lat: draft.lat, lng: draft.lng, visited: true, at: Date.now() });
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    spots.push({ id, name: $('fName').value.trim(), memo: $('fMemo').value.trim(), lat: draft.lat, lng: draft.lng, visited: true, at: Date.now() });
+    arrivalShown.add(id);
+    freshId = id;
     save(); $('sheet').hidden = true; renderAll();
+    map.setView([draft.lat, draft.lng], Math.max(map.getZoom(), 18));
+    window.scrollTo({ top: 0, behavior: 'smooth' });
     say('登録しました。');
+    setTimeout(() => { freshId = null; renderMarkers(); }, 6000);
+  };
+
+  $('arriveClose').onclick = () => { $('arrive').hidden = true; };
+  $('arriveDone').onclick = () => {
+    const s = spots.find((x) => x.id === arriveId);
+    if (s) { s.visited = true; s.at = Date.now(); freshId = s.id; save(); renderAll(); setTimeout(() => { freshId = null; renderMarkers(); }, 6000); }
+    $('arrive').hidden = true;
   };
 
   $('exportBtn').onclick = () => {
