@@ -6,6 +6,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="マンホール巡り">
 <meta name="theme-color" content="#23272b">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" href="apple-touch-icon.png">
 <title>マンホール巡り</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
@@ -65,7 +67,7 @@
   #nearest .name { font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
   #nearest .dist { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
 
-  #map { height: 38vh; min-height: 220px; border-radius: 10px; border: 1px solid var(--line); z-index: 0; }
+  #map { height: 38vh; min-height: 220px; border-radius: 10px; border: 1px solid var(--line); z-index: 0; flex: none; }
 
   .row { display: flex; gap: 8px; flex-wrap: wrap; }
   button {
@@ -75,38 +77,47 @@
   button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 700; flex: 1; }
   button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--me); outline-offset: 2px; }
 
+  .chip { border-radius: 999px; padding: 6px 14px; min-height: 36px; font-size: 14px; }
+  .chip[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 700; }
+  #q { flex: 1; min-width: 0; }
+
   #list { display: flex; flex-direction: column; gap: 8px; padding: 0; margin: 0; list-style: none; }
   #list li {
     background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
     padding: 10px 12px; display: grid; grid-template-columns: 1fr auto; gap: 4px 10px;
   }
+  #list li.inroute { border-color: var(--accent); }
   #list .t { font-weight: 600; overflow-wrap: anywhere; }
   #list .t.done { color: var(--ok); }
   #list .d { font-variant-numeric: tabular-nums; color: var(--muted); text-align: right; }
   #list .memo { grid-column: 1 / -1; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
   #list .acts { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; }
   #list .acts button { padding: 6px 12px; min-height: 36px; font-size: 14px; }
+  #list .acts button.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 700; }
   .empty { color: var(--muted); text-align: center; padding: 20px 8px; }
 
-  #sheet {
+  #sheet, #sheet2 {
     position: fixed; inset: 0; background: rgba(0,0,0,.5); display: grid; align-items: end; z-index: 1000;
   }
-  #sheet form {
+  #sheet form, #sheet2 form {
     background: var(--surface); border-radius: 16px 16px 0 0; padding: 16px 16px max(16px, env(safe-area-inset-bottom, 0px));
     display: flex; flex-direction: column; gap: 10px; max-width: 560px; width: 100%; margin: 0 auto;
   }
-  #sheet h2 { margin: 0; font-size: 17px; }
-  input[type=text], textarea {
+  #sheet h2, #sheet2 h2 { margin: 0; font-size: 17px; }
+  input[type=text], input[type=search], textarea {
     font: inherit; width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--line);
     background: var(--bg); color: var(--fg);
   }
   .pos { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .help { font-size: 13px; color: var(--muted); margin: 0; }
   #msg { color: var(--muted); font-size: 13px; min-height: 1.2em; }
+
   /* マンホールの蓋に見立てたピン。中の丸が点滅する */
   .pin { position: relative; width: 26px; height: 26px; border-radius: 50%; border: 3px solid var(--pin); background: var(--surface); }
   .pin::after { content: ""; position: absolute; inset: 4px; border-radius: 50%; background: var(--pin); animation: blink 1.6s ease-in-out infinite; }
   .pin.done { border-color: var(--pin-done); }
   .pin.done::after { background: var(--pin-done); }
+  .pin.route { box-shadow: 0 0 0 3px var(--me); }
   .pin.fresh { animation: ring 1s ease-out 6; }
   .pin.fresh::after { animation: blink .5s ease-in-out infinite; }
   @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .1; } }
@@ -147,7 +158,7 @@
     <svg viewBox="0 0 48 48" id="arrowSvg"><circle cx="24" cy="24" r="22" fill="none" stroke="var(--line)" stroke-width="2"/><path d="M24 7 L33 30 L24 25 L15 30 Z" fill="var(--accent)"/></svg>
   </div>
   <div class="info">
-    <div class="label">いちばん近い未訪問</div>
+    <div class="label" id="nLabel">いちばん近い未訪問</div>
     <div class="name" id="nName">現在地を取得中…</div>
     <div class="dist" id="nDist"></div>
   </div>
@@ -161,9 +172,20 @@
 </div>
 <div id="msg"></div>
 
+<div class="row" role="group" aria-label="表示の切り替え">
+  <button class="chip" id="fAll" aria-pressed="true">すべて</button>
+  <button class="chip" id="fRoute" aria-pressed="false">今日のルート</button>
+  <input type="search" id="q" placeholder="番号で探す(例: MC-07)" autocomplete="off" aria-label="番号で探す">
+</div>
+<div class="row" id="bulkRow" hidden>
+  <button id="addShown">表示中をすべて今日のルートへ</button>
+  <button id="clearRoute">ルートを空にする</button>
+</div>
+
 <ul id="list"></ul>
 
 <div class="row">
+  <button id="pasteBtn">番号の一覧を貼り付けて追加</button>
   <button id="exportBtn">バックアップを保存</button>
   <button id="importBtn">読み込み</button>
   <input type="file" id="importFile" accept="application/json" hidden>
@@ -184,6 +206,18 @@
   </form>
 </div>
 
+<div id="sheet2" hidden>
+  <form id="form2">
+    <h2>番号の一覧を追加</h2>
+    <p class="help">1行に1件。「番号 日付」の形で貼り付けます(日付は省略できます)。先頭に「昼」「夜」があれば区分として記録します。位置は、そのマンホールの上で「ここで位置を登録」を押すと入ります。</p>
+    <textarea id="bulk" rows="8" placeholder="昼 MA-1 4/27&#10;夜 MC-07-1 5/26"></textarea>
+    <div class="row">
+      <button type="button" id="cancel2">キャンセル</button>
+      <button type="submit" class="primary">追加</button>
+    </div>
+  </form>
+</div>
+
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 (function () {
@@ -198,13 +232,22 @@
   let arriveId = null;           // 到着の案内を出している地点
   const arrivalShown = new Set(); // 案内済みの地点(閉じたあと再表示しない)
   const ARRIVE_M = 30;
+  let filter = 'all';
+  let lastRender = 0;
+  let audio = null;
+
+  const hasPos = (s) => typeof s.lat === 'number' && typeof s.lng === 'number';
 
   function load() {
     try { const v = JSON.parse(localStorage.getItem(KEY) || '[]'); return Array.isArray(v) ? v : []; }
     catch (e) { return []; }
   }
-  function save() { try { localStorage.setItem(KEY, JSON.stringify(spots)); } catch (e) { say('保存できませんでした。バックアップを保存してください。'); } }
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify(spots)); return true; }
+    catch (e) { say('保存できませんでした。「バックアップを保存」を押してください。'); return false; }
+  }
   function say(t) { $('msg').textContent = t; }
+  const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
   function dist(a, b) {
     const R = 6371000, r = Math.PI / 180;
@@ -222,6 +265,27 @@
   const dirName = (deg) => DIRS[Math.round(deg / 45) % 8];
   function fmt(m) { return m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + ' km'; }
 
+  // 音: iPhoneのSafariは振動に対応していないため、到着は音と画面の帯で知らせる
+  function unlockAudio() {
+    if (audio) { if (audio.state === 'suspended') audio.resume(); return; }
+    try { const C = window.AudioContext || window.webkitAudioContext; if (C) audio = new C(); } catch (e) {}
+  }
+  document.addEventListener('pointerdown', unlockAudio);
+  function beep() {
+    if (!audio) return;
+    try {
+      [0, 0.28].forEach((t) => {
+        const o = audio.createOscillator(), g = audio.createGain();
+        o.frequency.value = t ? 1175 : 880; o.type = 'sine';
+        g.gain.setValueAtTime(0.0001, audio.currentTime + t);
+        g.gain.exponentialRampToValueAtTime(0.4, audio.currentTime + t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + t + 0.22);
+        o.connect(g); g.connect(audio.destination);
+        o.start(audio.currentTime + t); o.stop(audio.currentTime + t + 0.25);
+      });
+    } catch (e) {}
+  }
+
   function initMap() {
     map = L.map('map', { zoomControl: false }).setView([35.68, 139.76], 15);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -233,39 +297,80 @@
   function renderMarkers() {
     Object.values(markers).forEach((m) => m.remove());
     markers = {};
-    spots.forEach((s) => {
-      const icon = L.divIcon({ className: '', html: '<div class="pin' + (s.visited ? ' done' : '') + (s.id === freshId ? ' fresh' : '') + '"></div>', iconSize: [26, 26], iconAnchor: [13, 13] });
+    spots.filter(hasPos).forEach((s) => {
+      const cls = 'pin' + (s.visited ? ' done' : '') + (s.route ? ' route' : '') + (s.id === freshId ? ' fresh' : '');
+      const icon = L.divIcon({ className: '', html: '<div class="' + cls + '"></div>', iconSize: [26, 26], iconAnchor: [13, 13] });
       markers[s.id] = L.marker([s.lat, s.lng], { icon, title: s.name }).addTo(map)
         .on('click', () => document.getElementById('s-' + s.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
     });
   }
 
+  function shownSpots() {
+    const q = $('q').value.trim().toLowerCase();
+    return spots.filter((s) => (filter === 'all' || s.route) && (!q || (s.name + ' ' + (s.memo || '')).toLowerCase().includes(q)));
+  }
+
+  function pulseFresh(id) {
+    freshId = id;
+    setTimeout(() => { if (freshId === id) { freshId = null; renderMarkers(); } }, 6000);
+  }
+
   function render() {
+    lastRender = Date.now();
     const done = spots.filter((s) => s.visited).length;
+    const routeN = spots.filter((s) => s.route).length;
     $('count').textContent = spots.length ? done + ' / ' + spots.length + ' 訪問済み' : '';
+    $('fRoute').textContent = '今日のルート' + (routeN ? '(' + routeN + ')' : '');
+    $('fAll').setAttribute('aria-pressed', filter === 'all');
+    $('fRoute').setAttribute('aria-pressed', filter === 'route');
+
     const list = $('list');
     list.textContent = '';
-    if (!spots.length) {
+    const rows = shownSpots().map((s) => ({ s, d: me && hasPos(s) ? dist(me, s) : null }));
+    $('bulkRow').hidden = !(rows.length && (filter === 'route' ? true : $('q').value.trim())) && !routeN;
+    if (!rows.length) {
       const li = document.createElement('li');
       li.className = 'empty';
       li.style.display = 'block';
-      li.textContent = 'まだ登録がありません。マンホールの上で「いまここを登録」を押してください。';
+      li.textContent = !spots.length ? 'まだ登録がありません。マンホールの上で「いまここを登録」を押すか、番号の一覧を貼り付けてください。'
+        : filter === 'route' ? '今日のルートが空です。「すべて」から、まわる地点の「ルートに入れる」を押してください。' : '見つかりません。';
       list.appendChild(li);
     }
-    const rows = spots.map((s) => ({ s, d: me ? dist(me, s) : null }));
-    rows.sort((a, b) => (a.s.visited - b.s.visited) || ((a.d ?? 0) - (b.d ?? 0)));
+    rows.sort((a, b) => (a.s.visited - b.s.visited) || ((a.d ?? 1e12) - (b.d ?? 1e12)) || a.s.name.localeCompare(b.s.name, 'ja', { numeric: true }));
     rows.forEach(({ s, d }) => {
       const li = document.createElement('li');
       li.id = 's-' + s.id;
+      if (s.route) li.className = 'inroute';
       const t = document.createElement('div'); t.className = 't' + (s.visited ? ' done' : ''); t.textContent = (s.visited ? '✓ ' : '') + s.name;
-      const dd = document.createElement('div'); dd.className = 'd'; dd.textContent = d == null ? '' : fmt(d) + ' ' + dirName(bearing(me, s));
+      const dd = document.createElement('div'); dd.className = 'd';
+      dd.textContent = !hasPos(s) ? '位置未登録' : d == null ? '' : fmt(d) + ' ' + dirName(bearing(me, s));
       li.append(t, dd);
       if (s.memo) { const m = document.createElement('div'); m.className = 'memo'; m.textContent = s.memo; li.appendChild(m); }
       const acts = document.createElement('div'); acts.className = 'acts';
-      const nav = document.createElement('button'); nav.textContent = 'ナビ';
-      nav.onclick = () => { window.open('https://maps.apple.com/?daddr=' + s.lat + ',' + s.lng + '&dirflg=w', '_blank'); };
-      const go = document.createElement('button'); go.textContent = '地図で見る';
-      go.onclick = () => { map.setView([s.lat, s.lng], 18); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+
+      const rt = document.createElement('button'); rt.textContent = s.route ? 'ルートから外す' : 'ルートに入れる';
+      if (s.route) rt.className = 'on';
+      rt.onclick = () => { s.route = !s.route; save(); renderAll(); };
+
+      if (hasPos(s)) {
+        const nav = document.createElement('button'); nav.textContent = 'ナビ';
+        nav.onclick = () => { window.open('https://maps.apple.com/?daddr=' + s.lat + ',' + s.lng + '&dirflg=w', '_blank'); };
+        const go = document.createElement('button'); go.textContent = '地図で見る';
+        go.onclick = () => { map.setView([s.lat, s.lng], 18); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+        acts.append(nav, go);
+      } else {
+        const fix = document.createElement('button'); fix.textContent = 'ここで位置を登録'; fix.className = 'on';
+        fix.onclick = () => {
+          if (!me) { say('現在地を取得してから押してください。'); return; }
+          s.lat = me.lat; s.lng = me.lng; s.visited = true; s.at = Date.now();
+          arrivalShown.add(s.id);
+          save(); renderAll(); pulseFresh(s.id); renderMarkers();
+          map.setView([s.lat, s.lng], Math.max(map.getZoom(), 18));
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          say(s.name + ' の位置を登録しました(この端末に保存済み)。');
+        };
+        acts.append(fix);
+      }
       const vis = document.createElement('button'); vis.textContent = s.visited ? '未訪問に戻す' : '訪問済みにする';
       vis.onclick = () => { s.visited = !s.visited; s.at = s.visited ? Date.now() : null; save(); renderAll(); };
       const del = document.createElement('button'); del.textContent = '削除';
@@ -273,7 +378,7 @@
         if (del.dataset.arm) { spots = spots.filter((x) => x.id !== s.id); save(); renderAll(); }
         else { del.dataset.arm = '1'; del.textContent = 'もう一度押すと削除'; setTimeout(() => { del.dataset.arm = ''; del.textContent = '削除'; }, 3000); }
       };
-      acts.append(nav, go, vis, del);
+      acts.append(rt, vis, del);
       li.appendChild(acts);
       list.appendChild(li);
     });
@@ -281,11 +386,18 @@
   }
 
   function renderNearest() {
-    const todo = spots.filter((s) => !s.visited);
+    const routeOn = spots.some((s) => s.route);
+    const pool = spots.filter((s) => !s.visited && (!routeOn || s.route));
+    $('nLabel').textContent = routeOn ? '今日のルートで次の地点' : 'いちばん近い未訪問';
     if (!me) { $('nName').textContent = '現在地を取得中…'; $('nDist').textContent = ''; return; }
-    if (!todo.length) { $('nName').textContent = spots.length ? '全部まわりました' : 'マンホールを登録しましょう'; $('nDist').textContent = ''; return; }
+    if (!pool.length) {
+      $('nName').textContent = !spots.length ? 'マンホールを登録しましょう' : routeOn ? 'ルートを全部まわりました' : '全部まわりました';
+      $('nDist').textContent = ''; return;
+    }
+    const located = pool.filter(hasPos);
+    if (!located.length) { $('nName').textContent = '位置が未登録です。現地で「ここで位置を登録」を押してください'; $('nDist').textContent = ''; return; }
     let best = null, bd = Infinity;
-    todo.forEach((s) => { const d = dist(me, s); if (d < bd) { bd = d; best = s; } });
+    located.forEach((s) => { const d = dist(me, s); if (d < bd) { bd = d; best = s; } });
     $('nName').textContent = best.name;
     $('nDist').textContent = fmt(bd) + (bd < ARRIVE_M ? '  到着' : '');
     if (bd < ARRIVE_M && !arrivalShown.has(best.id)) {
@@ -293,6 +405,7 @@
       arriveId = best.id;
       $('arriveName').textContent = best.name;
       $('arrive').hidden = false;
+      beep();
       try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}
     }
     const b = bearing(me, best);
@@ -311,7 +424,8 @@
       map.setView(ll, 17);
     } else meMarker.setLatLng(ll);
     say('現在地の精度: 約' + Math.round(me.acc) + ' m');
-    render();
+    // 一覧は押している最中に作り直さないよう、間隔をあけて更新する
+    if (Date.now() - lastRender > 8000 && document.activeElement !== $('q')) render(); else renderNearest();
   }
   function onErr(e) {
     const m = { 1: '位置情報が許可されていません。設定 > Safari > 位置情報 で許可してください。', 2: '位置を取得できません。', 3: '位置の取得に時間がかかっています。' };
@@ -324,6 +438,12 @@
   }
 
   $('locBtn').onclick = () => { if (me) map.setView([me.lat, me.lng], 17); else say('現在地を取得中です。'); };
+  $('fAll').onclick = () => { filter = 'all'; render(); };
+  $('fRoute').onclick = () => { filter = 'route'; render(); };
+  $('q').oninput = () => render();
+  $('addShown').onclick = () => { shownSpots().forEach((s) => { s.route = true; }); save(); renderAll(); say('表示中の地点を今日のルートに入れました。'); };
+  $('clearRoute').onclick = () => { spots.forEach((s) => { s.route = false; }); save(); renderAll(); say('今日のルートを空にしました。'); };
+
   $('addBtn').onclick = () => {
     if (!me) { say('現在地を取得してから登録してください。'); return; }
     draft = { lat: me.lat, lng: me.lng, acc: me.acc };
@@ -334,22 +454,45 @@
   $('cancelBtn').onclick = () => { $('sheet').hidden = true; };
   $('form').onsubmit = (e) => {
     e.preventDefault();
-    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const id = newId();
     spots.push({ id, name: $('fName').value.trim(), memo: $('fMemo').value.trim(), lat: draft.lat, lng: draft.lng, visited: true, at: Date.now() });
     arrivalShown.add(id);
-    freshId = id;
-    save(); $('sheet').hidden = true; renderAll();
+    const ok = save();
+    $('sheet').hidden = true; renderAll(); pulseFresh(id); renderMarkers();
     map.setView([draft.lat, draft.lng], Math.max(map.getZoom(), 18));
     window.scrollTo({ top: 0, behavior: 'smooth' });
-    say('登録しました。');
-    setTimeout(() => { freshId = null; renderMarkers(); }, 6000);
+    if (ok) say('登録しました。この端末に保存済みです(全' + spots.length + '件)。');
   };
 
   $('arriveClose').onclick = () => { $('arrive').hidden = true; };
   $('arriveDone').onclick = () => {
     const s = spots.find((x) => x.id === arriveId);
-    if (s) { s.visited = true; s.at = Date.now(); freshId = s.id; save(); renderAll(); setTimeout(() => { freshId = null; renderMarkers(); }, 6000); }
+    if (s) { s.visited = true; s.at = Date.now(); save(); renderAll(); pulseFresh(s.id); renderMarkers(); }
     $('arrive').hidden = true;
+  };
+
+  // 番号の一覧を貼り付けて追加(位置は現地で登録する)
+  $('pasteBtn').onclick = () => { $('bulk').value = ''; $('sheet2').hidden = false; $('bulk').focus(); };
+  $('cancel2').onclick = () => { $('sheet2').hidden = true; };
+  $('form2').onsubmit = (e) => {
+    e.preventDefault();
+    const have = new Set(spots.map((s) => s.name));
+    let added = 0, skipped = 0;
+    $('bulk').value.split(/\r?\n/).slice(0, 500).forEach((line) => {
+      const parts = line.trim().split(/[\s,\t]+/).filter(Boolean);
+      if (!parts.length) return;
+      let grp = '';
+      if (/^[昼夜]/.test(parts[0]) && parts.length > 1) grp = parts.shift().slice(0, 4);
+      const name = parts.shift().slice(0, 60);
+      if (!name) return;
+      if (have.has(name)) { skipped++; return; }
+      have.add(name);
+      const memo = [grp && grp + '間作業分', parts.length && '点検 ' + parts.join(' ').slice(0, 40)].filter(Boolean).join(' / ');
+      spots.push({ id: newId() + added, name, memo, lat: null, lng: null, visited: false, at: null });
+      added++;
+    });
+    save(); $('sheet2').hidden = true; renderAll();
+    say(added + ' 件を追加しました' + (skipped ? '(重複 ' + skipped + ' 件は除外)' : '') + '。');
   };
 
   $('exportBtn').onclick = () => {
@@ -368,7 +511,12 @@
         if (!Array.isArray(v)) throw new Error();
         const ids = new Set(spots.map((s) => s.id));
         let n = 0;
-        v.forEach((s) => { if (s && typeof s.lat === 'number' && typeof s.lng === 'number' && s.name && !ids.has(s.id)) { spots.push({ id: String(s.id || Date.now() + n), name: String(s.name), memo: String(s.memo || ''), lat: s.lat, lng: s.lng, visited: !!s.visited, at: s.at || null }); n++; } });
+        v.forEach((s) => {
+          if (s && s.name && !ids.has(s.id)) {
+            spots.push({ id: String(s.id || newId() + n), name: String(s.name), memo: String(s.memo || ''), lat: typeof s.lat === 'number' ? s.lat : null, lng: typeof s.lng === 'number' ? s.lng : null, visited: !!s.visited, at: s.at || null, route: !!s.route });
+            n++;
+          }
+        });
         save(); renderAll(); say(n + ' 件を読み込みました。');
       } catch (err) { say('読み込めないファイルです。'); }
     };
