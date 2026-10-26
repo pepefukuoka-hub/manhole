@@ -179,6 +179,15 @@
   <input type="search" id="q" placeholder="番号で探す(例: MC-07)" autocomplete="off" aria-label="番号で探す">
 </div>
 <div class="help" id="alignInfo"></div>
+<div class="row" id="settings">
+  <label for="arriveSel" class="help">到着を知らせる距離</label>
+  <select id="arriveSel" aria-label="到着を知らせる距離">
+    <option value="5">5 m</option><option value="8">8 m</option><option value="10">10 m</option>
+    <option value="15">15 m</option><option value="20">20 m</option>
+  </select>
+  <label for="who" class="help">担当(提出時に記録)</label>
+  <input type="text" id="who" maxlength="20" autocomplete="off" placeholder="例: 岩下" style="max-width:160px">
+</div>
 <div class="row" id="bulkRow" hidden>
   <button id="addShown">表示中をすべて今日のルートへ</button>
   <button id="clearRoute">ルートを空にする</button>
@@ -189,9 +198,9 @@
 <div class="row">
   <button id="offlineBtn">空港エリアの地図を保存(オフライン用)</button>
   <button id="pasteBtn">番号の一覧を貼り付けて追加</button>
-  <button id="cadBtn">図面の座標を貼り付け</button>
+  <button id="submitBtn">提出用に書き出し</button>
   <button id="exportBtn">バックアップを保存</button>
-  <button id="importBtn">読み込み</button>
+  <button id="importBtn">読み込み(バックアップ・共有位置)</button>
   <input type="file" id="importFile" accept="application/json" hidden>
 </div>
 
@@ -222,18 +231,6 @@
   </form>
 </div>
 
-<div id="sheet3" hidden>
-  <form id="form3">
-    <h2>図面の座標を貼り付け</h2>
-    <p class="help">1行に1件。「番号 x y」の形で貼り付けます(図面上の座標)。同じ番号が一覧にあれば座標を足し、なければ新しく追加します。現地で図面にある2か所以上の位置を登録すると、残りの位置を推定してピンで出します。</p>
-    <textarea id="cadText" rows="8" placeholder="MA-1 2091.03 908.83&#10;MC-07-1 1983.71 566.27"></textarea>
-    <div class="row">
-      <button type="button" id="cancel3">キャンセル</button>
-      <button type="submit" class="primary">追加</button>
-    </div>
-  </form>
-</div>
-
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 (function () {
@@ -247,7 +244,8 @@
   let freshId = null;            // 登録直後のピン(中が速く点滅する)
   let arriveId = null;           // 到着の案内を出している地点
   const arrivalShown = new Set(); // 案内済みの地点(閉じたあと再表示しない)
-  const ARRIVE_M = 30;
+  let ARRIVE_M = 10;   // 到着を知らせる距離(m)。GPSと登録位置の誤差を合わせて、10m前後が目安
+  try { const v = parseInt(localStorage.getItem('manhole.arriveM'), 10); if (v >= 3 && v <= 50) ARRIVE_M = v; } catch (e) {}
   let filter = 'all';
   let lastRender = 0;
   let audio = null;
@@ -255,53 +253,16 @@
   const isNum = (v) => typeof v === 'number' && isFinite(v);
   const hasActual = (s) => isNum(s.lat) && isNum(s.lng);
 
-  // 図面の座標(cx, cy)を、実測した2か所以上の位置から地図の座標に合わせる(拡大・回転・平行移動)
-  let align = null;
-  const M_LAT = 110540, M_LNG = (lat) => 111320 * Math.cos(lat * Math.PI / 180);
-  function toM(lat, lng) { return [(lng - AIRPORT.lng) * M_LNG(AIRPORT.lat), (lat - AIRPORT.lat) * M_LAT]; }
-  function fromM(x, y) { return { lat: AIRPORT.lat + y / M_LAT, lng: AIRPORT.lng + x / M_LNG(AIRPORT.lat) }; }
-  function computeAlign() {
-    const A = spots.filter((s) => hasActual(s) && isNum(s.cx) && isNum(s.cy));
-    align = null;
-    if (A.length < 2) return;
-    const z = A.map((s) => [s.cx, s.cy]), w = A.map((s) => toM(s.lat, s.lng));
-    const mean = (arr, i) => arr.reduce((t, p) => t + p[i], 0) / arr.length;
-    const zx = mean(z, 0), zy = mean(z, 1), wx = mean(w, 0), wy = mean(w, 1);
-    let nr = 0, ni = 0, den = 0;
-    z.forEach((p, k) => {
-      const dx = p[0] - zx, dy = p[1] - zy, ex = w[k][0] - wx, ey = w[k][1] - wy;
-      nr += ex * dx + ey * dy; ni += ey * dx - ex * dy; den += dx * dx + dy * dy;
-    });
-    if (den < 1e-9) return;
-    const a = [nr / den, ni / den];
-    const b = [wx - (a[0] * zx - a[1] * zy), wy - (a[0] * zy + a[1] * zx)];
-    let se = 0;
-    z.forEach((p, k) => {
-      const X = a[0] * p[0] - a[1] * p[1] + b[0], Y = a[0] * p[1] + a[1] * p[0] + b[1];
-      se += (X - w[k][0]) ** 2 + (Y - w[k][1]) ** 2;
-    });
-    let span = 0;
-    for (let i = 0; i < w.length; i++) for (let j = i + 1; j < w.length; j++) span = Math.max(span, Math.hypot(w[i][0] - w[j][0], w[i][1] - w[j][1]));
-    align = { a, b, n: A.length, rms: Math.sqrt(se / A.length), scale: Math.hypot(a[0], a[1]), rot: Math.atan2(a[1], a[0]) * 180 / Math.PI, span };
-  }
-  // 位置: 実測があればそれ、なければ図面からの推定(est: true)
+  // 位置: 共有位置(全員の登録を集約したもの)があればそれ、なければ自分の登録
   function pos(s) {
+    if (isNum(s.mlat) && isNum(s.mlng)) return { lat: s.mlat, lng: s.mlng, est: false, shared: true };
     if (hasActual(s)) return { lat: s.lat, lng: s.lng, est: false };
-    if (align && isNum(s.cx) && isNum(s.cy)) {
-      const p = fromM(align.a[0] * s.cx - align.a[1] * s.cy + align.b[0], align.a[0] * s.cy + align.a[1] * s.cx + align.b[1]);
-      return { lat: p.lat, lng: p.lng, est: true };
-    }
     return null;
   }
   const hasPos = (s) => !!pos(s);
-  function alignText() {
-    const withXY = spots.filter((s) => isNum(s.cx)).length;
-    if (!withXY) return '';
-    if (!align) return '図面の座標 ' + withXY + ' 件。位置の推定には、図面にある地点の実測が2か所以上必要です(現地で「ここで位置を登録」)。';
-    let t = '位置合わせ: 実測 ' + align.n + ' か所 / 誤差 約' + Math.round(align.rms) + ' m / 倍率 ×' + align.scale.toFixed(3) + ' / 回転 ' + Math.round(align.rot) + '°';
-    if (align.span < 50) t += '。実測した2か所が近すぎます。離れた地点も登録してください。';
-    else if (align.scale < 0.8 || align.scale > 1.25) t += '。倍率が1から離れています。実測を取り直してください。';
-    return t;
+  function sharedText() {
+    const mine = spots.filter(hasActual).length, shared = spots.filter((s) => isNum(s.mlat)).length;
+    return spots.length ? '自分の登録 ' + mine + ' 件' + (shared ? ' / 共有位置 ' + shared + ' 件' : '') : '';
   }
 
   function load() {
@@ -440,8 +401,7 @@
 
   function render() {
     lastRender = Date.now();
-    computeAlign();
-    $('alignInfo').textContent = alignText();
+    $('alignInfo').textContent = sharedText();
     const done = spots.filter((s) => s.visited).length;
     const routeN = spots.filter((s) => s.route).length;
     $('count').textContent = spots.length ? done + ' / ' + spots.length + ' 訪問済み' : '';
@@ -488,7 +448,7 @@
         const fix = document.createElement('button'); fix.textContent = 'ここで位置を登録'; fix.className = 'on';
         fix.onclick = () => {
           if (!me) { say('現在地を取得してから押してください。'); return; }
-          s.lat = me.lat; s.lng = me.lng; s.visited = true; s.at = Date.now();
+          s.lat = me.lat; s.lng = me.lng; s.acc = me.acc; s.visited = true; s.at = Date.now();
           arrivalShown.add(s.id);
           save(); renderAll(); pulseFresh(s.id); renderMarkers();
           map.setView([s.lat, s.lng], Math.max(map.getZoom(), 18));
@@ -526,7 +486,7 @@
     located.forEach((s) => { const p = pos(s), d = dist(me, p); if (d < bd) { bd = d; best = s; bp = p; } });
     $('nName').textContent = best.name + (bp.est ? '(推定位置)' : '');
     $('nDist').textContent = fmt(bd) + (bd < ARRIVE_M ? '  到着' : '');
-    if (bd < ARRIVE_M && !arrivalShown.has(best.id)) {
+    if (bd < ARRIVE_M && me.acc <= 40 && !arrivalShown.has(best.id)) {
       arrivalShown.add(best.id);
       arriveId = best.id;
       $('arriveName').textContent = best.name + (bp.est ? '(推定位置。ずれている場合があります)' : '');
@@ -539,7 +499,7 @@
     $('arrowSvg').style.transform = 'rotate(' + rot + 'deg)';
   }
 
-  function renderAll() { computeAlign(); renderMarkers(); render(); }
+  function renderAll() { renderMarkers(); render(); }
 
   function onPos(p) {
     me = { lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy };
@@ -584,11 +544,11 @@
     const same = spots.find((s) => s.name === name && !hasActual(s));  // 一覧や図面にある番号なら、その地点に位置を入れる
     let id;
     if (same) {
-      id = same.id; same.lat = draft.lat; same.lng = draft.lng; same.visited = true; same.at = Date.now();
+      id = same.id; same.lat = draft.lat; same.lng = draft.lng; same.acc = draft.acc; same.visited = true; same.at = Date.now();
       if ($('fMemo').value.trim()) same.memo = [same.memo, $('fMemo').value.trim()].filter(Boolean).join(' / ');
     } else {
       id = newId();
-      spots.push({ id, name, memo: $('fMemo').value.trim(), lat: draft.lat, lng: draft.lng, visited: true, at: Date.now() });
+      spots.push({ id, name, memo: $('fMemo').value.trim(), lat: draft.lat, lng: draft.lng, acc: draft.acc, visited: true, at: Date.now() });
     }
     arrivalShown.add(id);
     const ok = save();
@@ -629,24 +589,53 @@
     say(added + ' 件を追加しました' + (skipped ? '(重複 ' + skipped + ' 件は除外)' : '') + '。');
   };
 
-  // 図面の座標を貼り付け: 「番号 x y」
-  $('cadBtn').onclick = () => { $('cadText').value = ''; $('sheet3').hidden = false; $('cadText').focus(); };
-  $('cancel3').onclick = () => { $('sheet3').hidden = true; };
-  $('form3').onsubmit = (e) => {
-    e.preventDefault();
-    const byName = new Map(spots.map((s) => [s.name, s]));
-    let merged = 0, added = 0, bad = 0;
-    $('cadText').value.split(/\r?\n/).slice(0, 1000).forEach((line) => {
-      const parts = line.trim().split(/[\s,\t]+/).filter(Boolean);
-      if (parts.length < 3) { if (parts.length) bad++; return; }
-      const y = Number(parts.pop()), x = Number(parts.pop()), name = parts.join(' ').slice(0, 60);
-      if (!isFinite(x) || !isFinite(y) || !name) { bad++; return; }
-      const hit = byName.get(name);
-      if (hit) { hit.cx = x; hit.cy = y; merged++; }
-      else { const s = { id: newId() + added, name, memo: '図面から追加', lat: null, lng: null, cx: x, cy: y, visited: false, at: null }; spots.push(s); byName.set(name, s); added++; }
+  // 共有位置(全員の提出を集約したもの)を取り込む
+  function applyMaster(list) {
+    const byName = new Map(spots.map((x) => [x.name, x]));
+    let upd = 0, add = 0;
+    list.forEach((m) => {
+      if (!m || !m.name || !isNum(m.lat) || !isNum(m.lng)) return;
+      const hit = byName.get(String(m.name));
+      if (hit) { hit.mlat = m.lat; hit.mlng = m.lng; hit.mn = m.n || 1; upd++; }
+      else {
+        const sp = { id: newId() + add, name: String(m.name).slice(0, 60), memo: '共有位置', lat: null, lng: null, mlat: m.lat, mlng: m.lng, mn: m.n || 1, visited: false, at: null };
+        spots.push(sp); byName.set(sp.name, sp); add++;
+      }
     });
-    save(); $('sheet3').hidden = true; renderAll();
-    say('図面の座標: ' + merged + ' 件に追加、' + added + ' 件を新規追加' + (bad ? '(読めない行 ' + bad + ' 行)' : '') + '。');
+    save(); renderAll(); say('共有位置を取り込みました(更新 ' + upd + ' 件、新規 ' + add + ' 件)。');
+  }
+
+  // 提出用の書き出し: 自分が現地で登録した位置だけを、担当名つきで出す
+  async function submitExport() {
+    const who = $('who').value.trim();
+    if (!who) { say('先に「担当」を入力してください(提出した人を区別するため)。'); $('who').focus(); return; }
+    const mine = spots.filter(hasActual);
+    if (!mine.length) { say('提出できる位置の登録がありません。'); return; }
+    const d = new Date(), pad = (n) => String(n).padStart(2, '0');
+    const ymd = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate());
+    const data = { format: 'manhole-upload-v1', date: ymd, who, spots: mine.map((x) => ({ name: x.name, lat: x.lat, lng: x.lng, acc: isNum(x.acc) ? Math.round(x.acc) : null, at: x.at || null })) };
+    const fname = 'manhole-' + ymd + '-' + who + '.json';
+    const text = JSON.stringify(data, null, 2);
+    try {
+      const file = new File([text], fname, { type: 'application/json' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: fname });
+        say(mine.length + ' 件を提出用に書き出しました。'); return;
+      }
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' })); a.download = fname; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    say(mine.length + ' 件を提出用に書き出しました(' + fname + ')。');
+  }
+  $('submitBtn').onclick = submitExport;
+  try { $('who').value = localStorage.getItem('manhole.who') || ''; } catch (e) {}
+  $('who').onchange = () => { try { localStorage.setItem('manhole.who', $('who').value.trim()); } catch (e) {} };
+  $('arriveSel').value = String(ARRIVE_M);
+  $('arriveSel').onchange = () => {
+    ARRIVE_M = parseInt($('arriveSel').value, 10);
+    try { localStorage.setItem('manhole.arriveM', String(ARRIVE_M)); } catch (e) {}
+    say('到着を知らせる距離を ' + ARRIVE_M + ' m にしました。');
   };
 
   $('exportBtn').onclick = () => {
@@ -662,12 +651,13 @@
     r.onload = () => {
       try {
         const v = JSON.parse(r.result);
+        if (v && v.format === 'manhole-master-v1' && Array.isArray(v.spots)) { applyMaster(v.spots); return; }
         if (!Array.isArray(v)) throw new Error();
         const ids = new Set(spots.map((s) => s.id));
         let n = 0;
         v.forEach((s) => {
           if (s && s.name && !ids.has(s.id)) {
-            spots.push({ id: String(s.id || newId() + n), name: String(s.name), memo: String(s.memo || ''), lat: isNum(s.lat) ? s.lat : null, lng: isNum(s.lng) ? s.lng : null, cx: isNum(s.cx) ? s.cx : undefined, cy: isNum(s.cy) ? s.cy : undefined, visited: !!s.visited, at: s.at || null, route: !!s.route });
+            spots.push({ id: String(s.id || newId() + n), name: String(s.name), memo: String(s.memo || ''), lat: isNum(s.lat) ? s.lat : null, lng: isNum(s.lng) ? s.lng : null, acc: isNum(s.acc) ? s.acc : undefined, mlat: isNum(s.mlat) ? s.mlat : undefined, mlng: isNum(s.mlng) ? s.mlng : undefined, mn: isNum(s.mn) ? s.mn : undefined, visited: !!s.visited, at: s.at || null, route: !!s.route });
             n++;
           }
         });
