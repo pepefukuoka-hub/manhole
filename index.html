@@ -185,6 +185,7 @@
 <ul id="list"></ul>
 
 <div class="row">
+  <button id="offlineBtn">空港エリアの地図を保存(オフライン用)</button>
   <button id="pasteBtn">番号の一覧を貼り付けて追加</button>
   <button id="exportBtn">バックアップを保存</button>
   <button id="importBtn">読み込み</button>
@@ -287,11 +288,66 @@
   }
 
   function initMap() {
-    map = L.map('map', { zoomControl: false }).setView([35.68, 139.76], 15);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19, attribution: '© OpenStreetMap'
-    }).addTo(map);
+    map = L.map('map', { zoomControl: false }).setView([AIRPORT.lat, AIRPORT.lng], 16);
+    const attr = '<a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル</a>';
+    const std = L.tileLayer(tileUrl('std', 'png'), { maxZoom: 19, maxNativeZoom: 18, attribution: attr }).addTo(map);
+    const photo = L.tileLayer(tileUrl('seamlessphoto', 'jpg'), { maxZoom: 19, maxNativeZoom: 18, attribution: attr });
+    L.control.layers({ '標準地図': std, '航空写真': photo }, null, { position: 'topleft' }).addTo(map);
     L.control.zoom({ position: 'topright' }).addTo(map);
+  }
+
+  // 岡山空港の敷地まわり(オフライン保存の範囲)
+  const AIRPORT = { lat: 34.7569, lng: 133.8539 };
+  const AREA = { s: 34.7481, w: 133.8386, n: 34.7662, e: 133.8725 };
+  const ZOOMS = [15, 16, 17, 18];
+  const LAYERS = [['std', 'png'], ['seamlessphoto', 'jpg']];
+  function tileUrl(layer, ext) { return 'https://cyberjapandata.gsi.go.jp/xyz/' + layer + '/{z}/{x}/{y}.' + ext; }
+  function tileXY(lat, lng, z) {
+    const n = 2 ** z, r = Math.PI / 180;
+    return { x: Math.floor((lng + 180) / 360 * n), y: Math.floor((1 - Math.log(Math.tan(lat * r) + 1 / Math.cos(lat * r)) / Math.PI) / 2 * n) };
+  }
+  function areaUrls() {
+    const urls = [];
+    LAYERS.forEach(([layer, ext]) => ZOOMS.forEach((z) => {
+      const a = tileXY(AREA.n, AREA.w, z), b = tileXY(AREA.s, AREA.e, z);
+      for (let x = a.x; x <= b.x; x++) for (let y = a.y; y <= b.y; y++) urls.push(tileUrl(layer, ext).replace('{z}', z).replace('{x}', x).replace('{y}', y));
+    }));
+    return urls;
+  }
+  let saving = false;
+  async function saveOffline() {
+    if (saving) return;
+    if (!('caches' in window)) { say('この端末では地図を保存できません。'); return; }
+    if (!navigator.onLine) { say('通信できる場所で押してください。'); return; }
+    saving = true;
+    const btn = $('offlineBtn');
+    try {
+      const cache = await caches.open('manhole-tiles-v1');
+      const urls = areaUrls();
+      let done = 0, fail = 0, i = 0;
+      const tick = () => { btn.textContent = '保存中 ' + done + ' / ' + urls.length; };
+      tick();
+      const worker = async () => {
+        while (i < urls.length) {
+          const u = urls[i++];
+          try {
+            if (!(await cache.match(u))) {
+              const res = await fetch(u, { mode: 'cors' });
+              if (res.ok) await cache.put(u, res); else fail++;
+            }
+          } catch (e) { fail++; }
+          done++;
+          if (done % 10 === 0) tick();
+        }
+      };
+      await Promise.all(Array.from({ length: 6 }, worker));
+      try { localStorage.setItem('manhole.offlineSavedAt', String(Date.now())); } catch (e) {}
+      say(fail ? '地図を保存しました(' + fail + ' 枚は取得できませんでした。もう一度押すと補えます)。' : '空港エリアの地図を保存しました。圏外でも表示されます。');
+    } catch (e) {
+      say('地図を保存できませんでした。空き容量を確認してください。');
+    }
+    btn.textContent = '空港エリアの地図を保存(オフライン用)';
+    saving = false;
   }
 
   function renderMarkers() {
@@ -522,6 +578,9 @@
     };
     r.readAsText(f); e.target.value = '';
   };
+
+  $('offlineBtn').onclick = saveOffline;
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
   initMap();
   renderAll();
