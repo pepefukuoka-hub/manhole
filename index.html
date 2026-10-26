@@ -96,14 +96,14 @@
   #list .acts button.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 700; }
   .empty { color: var(--muted); text-align: center; padding: 20px 8px; }
 
-  #sheet, #sheet2 {
+  #sheet, #sheet2, #sheet3 {
     position: fixed; inset: 0; background: rgba(0,0,0,.5); display: grid; align-items: end; z-index: 1000;
   }
-  #sheet form, #sheet2 form {
+  #sheet form, #sheet2 form, #sheet3 form {
     background: var(--surface); border-radius: 16px 16px 0 0; padding: 16px 16px max(16px, env(safe-area-inset-bottom, 0px));
     display: flex; flex-direction: column; gap: 10px; max-width: 560px; width: 100%; margin: 0 auto;
   }
-  #sheet h2, #sheet2 h2 { margin: 0; font-size: 17px; }
+  #sheet h2, #sheet2 h2, #sheet3 h2 { margin: 0; font-size: 17px; }
   input[type=text], input[type=search], textarea {
     font: inherit; width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--line);
     background: var(--bg); color: var(--fg);
@@ -118,6 +118,7 @@
   .pin.done { border-color: var(--pin-done); }
   .pin.done::after { background: var(--pin-done); }
   .pin.route { box-shadow: 0 0 0 3px var(--me); }
+  .pin.est { border-style: dashed; }
   .pin.fresh { animation: ring 1s ease-out 6; }
   .pin.fresh::after { animation: blink .5s ease-in-out infinite; }
   @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .1; } }
@@ -177,6 +178,7 @@
   <button class="chip" id="fRoute" aria-pressed="false">今日のルート</button>
   <input type="search" id="q" placeholder="番号で探す(例: MC-07)" autocomplete="off" aria-label="番号で探す">
 </div>
+<div class="help" id="alignInfo"></div>
 <div class="row" id="bulkRow" hidden>
   <button id="addShown">表示中をすべて今日のルートへ</button>
   <button id="clearRoute">ルートを空にする</button>
@@ -187,6 +189,7 @@
 <div class="row">
   <button id="offlineBtn">空港エリアの地図を保存(オフライン用)</button>
   <button id="pasteBtn">番号の一覧を貼り付けて追加</button>
+  <button id="cadBtn">図面の座標を貼り付け</button>
   <button id="exportBtn">バックアップを保存</button>
   <button id="importBtn">読み込み</button>
   <input type="file" id="importFile" accept="application/json" hidden>
@@ -219,6 +222,18 @@
   </form>
 </div>
 
+<div id="sheet3" hidden>
+  <form id="form3">
+    <h2>図面の座標を貼り付け</h2>
+    <p class="help">1行に1件。「番号 x y」の形で貼り付けます(図面上の座標)。同じ番号が一覧にあれば座標を足し、なければ新しく追加します。現地で図面にある2か所以上の位置を登録すると、残りの位置を推定してピンで出します。</p>
+    <textarea id="cadText" rows="8" placeholder="MA-1 2091.03 908.83&#10;MC-07-1 1983.71 566.27"></textarea>
+    <div class="row">
+      <button type="button" id="cancel3">キャンセル</button>
+      <button type="submit" class="primary">追加</button>
+    </div>
+  </form>
+</div>
+
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 (function () {
@@ -237,7 +252,57 @@
   let lastRender = 0;
   let audio = null;
 
-  const hasPos = (s) => typeof s.lat === 'number' && typeof s.lng === 'number';
+  const isNum = (v) => typeof v === 'number' && isFinite(v);
+  const hasActual = (s) => isNum(s.lat) && isNum(s.lng);
+
+  // 図面の座標(cx, cy)を、実測した2か所以上の位置から地図の座標に合わせる(拡大・回転・平行移動)
+  let align = null;
+  const M_LAT = 110540, M_LNG = (lat) => 111320 * Math.cos(lat * Math.PI / 180);
+  function toM(lat, lng) { return [(lng - AIRPORT.lng) * M_LNG(AIRPORT.lat), (lat - AIRPORT.lat) * M_LAT]; }
+  function fromM(x, y) { return { lat: AIRPORT.lat + y / M_LAT, lng: AIRPORT.lng + x / M_LNG(AIRPORT.lat) }; }
+  function computeAlign() {
+    const A = spots.filter((s) => hasActual(s) && isNum(s.cx) && isNum(s.cy));
+    align = null;
+    if (A.length < 2) return;
+    const z = A.map((s) => [s.cx, s.cy]), w = A.map((s) => toM(s.lat, s.lng));
+    const mean = (arr, i) => arr.reduce((t, p) => t + p[i], 0) / arr.length;
+    const zx = mean(z, 0), zy = mean(z, 1), wx = mean(w, 0), wy = mean(w, 1);
+    let nr = 0, ni = 0, den = 0;
+    z.forEach((p, k) => {
+      const dx = p[0] - zx, dy = p[1] - zy, ex = w[k][0] - wx, ey = w[k][1] - wy;
+      nr += ex * dx + ey * dy; ni += ey * dx - ex * dy; den += dx * dx + dy * dy;
+    });
+    if (den < 1e-9) return;
+    const a = [nr / den, ni / den];
+    const b = [wx - (a[0] * zx - a[1] * zy), wy - (a[0] * zy + a[1] * zx)];
+    let se = 0;
+    z.forEach((p, k) => {
+      const X = a[0] * p[0] - a[1] * p[1] + b[0], Y = a[0] * p[1] + a[1] * p[0] + b[1];
+      se += (X - w[k][0]) ** 2 + (Y - w[k][1]) ** 2;
+    });
+    let span = 0;
+    for (let i = 0; i < w.length; i++) for (let j = i + 1; j < w.length; j++) span = Math.max(span, Math.hypot(w[i][0] - w[j][0], w[i][1] - w[j][1]));
+    align = { a, b, n: A.length, rms: Math.sqrt(se / A.length), scale: Math.hypot(a[0], a[1]), rot: Math.atan2(a[1], a[0]) * 180 / Math.PI, span };
+  }
+  // 位置: 実測があればそれ、なければ図面からの推定(est: true)
+  function pos(s) {
+    if (hasActual(s)) return { lat: s.lat, lng: s.lng, est: false };
+    if (align && isNum(s.cx) && isNum(s.cy)) {
+      const p = fromM(align.a[0] * s.cx - align.a[1] * s.cy + align.b[0], align.a[0] * s.cy + align.a[1] * s.cx + align.b[1]);
+      return { lat: p.lat, lng: p.lng, est: true };
+    }
+    return null;
+  }
+  const hasPos = (s) => !!pos(s);
+  function alignText() {
+    const withXY = spots.filter((s) => isNum(s.cx)).length;
+    if (!withXY) return '';
+    if (!align) return '図面の座標 ' + withXY + ' 件。位置の推定には、図面にある地点の実測が2か所以上必要です(現地で「ここで位置を登録」)。';
+    let t = '位置合わせ: 実測 ' + align.n + ' か所 / 誤差 約' + Math.round(align.rms) + ' m / 倍率 ×' + align.scale.toFixed(3) + ' / 回転 ' + Math.round(align.rot) + '°';
+    if (align.span < 50) t += '。実測した2か所が近すぎます。離れた地点も登録してください。';
+    else if (align.scale < 0.8 || align.scale > 1.25) t += '。倍率が1から離れています。実測を取り直してください。';
+    return t;
+  }
 
   function load() {
     try { const v = JSON.parse(localStorage.getItem(KEY) || '[]'); return Array.isArray(v) ? v : []; }
@@ -353,10 +418,12 @@
   function renderMarkers() {
     Object.values(markers).forEach((m) => m.remove());
     markers = {};
-    spots.filter(hasPos).forEach((s) => {
-      const cls = 'pin' + (s.visited ? ' done' : '') + (s.route ? ' route' : '') + (s.id === freshId ? ' fresh' : '');
+    spots.forEach((s) => {
+      const p = pos(s);
+      if (!p) return;
+      const cls = 'pin' + (s.visited ? ' done' : '') + (s.route ? ' route' : '') + (p.est ? ' est' : '') + (s.id === freshId ? ' fresh' : '');
       const icon = L.divIcon({ className: '', html: '<div class="' + cls + '"></div>', iconSize: [26, 26], iconAnchor: [13, 13] });
-      markers[s.id] = L.marker([s.lat, s.lng], { icon, title: s.name }).addTo(map)
+      markers[s.id] = L.marker([p.lat, p.lng], { icon, title: s.name }).addTo(map)
         .on('click', () => document.getElementById('s-' + s.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
     });
   }
@@ -373,6 +440,8 @@
 
   function render() {
     lastRender = Date.now();
+    computeAlign();
+    $('alignInfo').textContent = alignText();
     const done = spots.filter((s) => s.visited).length;
     const routeN = spots.filter((s) => s.route).length;
     $('count').textContent = spots.length ? done + ' / ' + spots.length + ' 訪問済み' : '';
@@ -382,7 +451,7 @@
 
     const list = $('list');
     list.textContent = '';
-    const rows = shownSpots().map((s) => ({ s, d: me && hasPos(s) ? dist(me, s) : null }));
+    const rows = shownSpots().map((s) => { const p = pos(s); return { s, p, d: me && p ? dist(me, p) : null }; });
     $('bulkRow').hidden = !(rows.length && (filter === 'route' ? true : $('q').value.trim())) && !routeN;
     if (!rows.length) {
       const li = document.createElement('li');
@@ -393,13 +462,13 @@
       list.appendChild(li);
     }
     rows.sort((a, b) => (a.s.visited - b.s.visited) || ((a.d ?? 1e12) - (b.d ?? 1e12)) || a.s.name.localeCompare(b.s.name, 'ja', { numeric: true }));
-    rows.forEach(({ s, d }) => {
+    rows.forEach(({ s, p, d }) => {
       const li = document.createElement('li');
       li.id = 's-' + s.id;
       if (s.route) li.className = 'inroute';
       const t = document.createElement('div'); t.className = 't' + (s.visited ? ' done' : ''); t.textContent = (s.visited ? '✓ ' : '') + s.name;
       const dd = document.createElement('div'); dd.className = 'd';
-      dd.textContent = !hasPos(s) ? '位置未登録' : d == null ? '' : fmt(d) + ' ' + dirName(bearing(me, s));
+      dd.textContent = !p ? '位置未登録' : d == null ? (p.est ? '推定' : '') : fmt(d) + ' ' + dirName(bearing(me, p)) + (p.est ? '(推定)' : '');
       li.append(t, dd);
       if (s.memo) { const m = document.createElement('div'); m.className = 'memo'; m.textContent = s.memo; li.appendChild(m); }
       const acts = document.createElement('div'); acts.className = 'acts';
@@ -408,13 +477,14 @@
       if (s.route) rt.className = 'on';
       rt.onclick = () => { s.route = !s.route; save(); renderAll(); };
 
-      if (hasPos(s)) {
+      if (p) {
         const nav = document.createElement('button'); nav.textContent = 'ナビ';
-        nav.onclick = () => { window.open('https://maps.apple.com/?daddr=' + s.lat + ',' + s.lng + '&dirflg=w', '_blank'); };
+        nav.onclick = () => { window.open('https://maps.apple.com/?daddr=' + p.lat + ',' + p.lng + '&dirflg=w', '_blank'); };
         const go = document.createElement('button'); go.textContent = '地図で見る';
-        go.onclick = () => { map.setView([s.lat, s.lng], 18); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+        go.onclick = () => { map.setView([p.lat, p.lng], 18); window.scrollTo({ top: 0, behavior: 'smooth' }); };
         acts.append(nav, go);
-      } else {
+      }
+      if (!hasActual(s)) {
         const fix = document.createElement('button'); fix.textContent = 'ここで位置を登録'; fix.className = 'on';
         fix.onclick = () => {
           if (!me) { say('現在地を取得してから押してください。'); return; }
@@ -452,24 +522,24 @@
     }
     const located = pool.filter(hasPos);
     if (!located.length) { $('nName').textContent = '位置が未登録です。現地で「ここで位置を登録」を押してください'; $('nDist').textContent = ''; return; }
-    let best = null, bd = Infinity;
-    located.forEach((s) => { const d = dist(me, s); if (d < bd) { bd = d; best = s; } });
-    $('nName').textContent = best.name;
+    let best = null, bd = Infinity, bp = null;
+    located.forEach((s) => { const p = pos(s), d = dist(me, p); if (d < bd) { bd = d; best = s; bp = p; } });
+    $('nName').textContent = best.name + (bp.est ? '(推定位置)' : '');
     $('nDist').textContent = fmt(bd) + (bd < ARRIVE_M ? '  到着' : '');
     if (bd < ARRIVE_M && !arrivalShown.has(best.id)) {
       arrivalShown.add(best.id);
       arriveId = best.id;
-      $('arriveName').textContent = best.name;
+      $('arriveName').textContent = best.name + (bp.est ? '(推定位置。ずれている場合があります)' : '');
       $('arrive').hidden = false;
       beep();
       try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}
     }
-    const b = bearing(me, best);
+    const b = bearing(me, bp);
     const rot = heading == null ? b : (b - heading + 360) % 360;
     $('arrowSvg').style.transform = 'rotate(' + rot + 'deg)';
   }
 
-  function renderAll() { renderMarkers(); render(); }
+  function renderAll() { computeAlign(); renderMarkers(); render(); }
 
   function onPos(p) {
     me = { lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy };
@@ -510,8 +580,16 @@
   $('cancelBtn').onclick = () => { $('sheet').hidden = true; };
   $('form').onsubmit = (e) => {
     e.preventDefault();
-    const id = newId();
-    spots.push({ id, name: $('fName').value.trim(), memo: $('fMemo').value.trim(), lat: draft.lat, lng: draft.lng, visited: true, at: Date.now() });
+    const name = $('fName').value.trim();
+    const same = spots.find((s) => s.name === name && !hasActual(s));  // 一覧や図面にある番号なら、その地点に位置を入れる
+    let id;
+    if (same) {
+      id = same.id; same.lat = draft.lat; same.lng = draft.lng; same.visited = true; same.at = Date.now();
+      if ($('fMemo').value.trim()) same.memo = [same.memo, $('fMemo').value.trim()].filter(Boolean).join(' / ');
+    } else {
+      id = newId();
+      spots.push({ id, name, memo: $('fMemo').value.trim(), lat: draft.lat, lng: draft.lng, visited: true, at: Date.now() });
+    }
     arrivalShown.add(id);
     const ok = save();
     $('sheet').hidden = true; renderAll(); pulseFresh(id); renderMarkers();
@@ -551,6 +629,26 @@
     say(added + ' 件を追加しました' + (skipped ? '(重複 ' + skipped + ' 件は除外)' : '') + '。');
   };
 
+  // 図面の座標を貼り付け: 「番号 x y」
+  $('cadBtn').onclick = () => { $('cadText').value = ''; $('sheet3').hidden = false; $('cadText').focus(); };
+  $('cancel3').onclick = () => { $('sheet3').hidden = true; };
+  $('form3').onsubmit = (e) => {
+    e.preventDefault();
+    const byName = new Map(spots.map((s) => [s.name, s]));
+    let merged = 0, added = 0, bad = 0;
+    $('cadText').value.split(/\r?\n/).slice(0, 1000).forEach((line) => {
+      const parts = line.trim().split(/[\s,\t]+/).filter(Boolean);
+      if (parts.length < 3) { if (parts.length) bad++; return; }
+      const y = Number(parts.pop()), x = Number(parts.pop()), name = parts.join(' ').slice(0, 60);
+      if (!isFinite(x) || !isFinite(y) || !name) { bad++; return; }
+      const hit = byName.get(name);
+      if (hit) { hit.cx = x; hit.cy = y; merged++; }
+      else { const s = { id: newId() + added, name, memo: '図面から追加', lat: null, lng: null, cx: x, cy: y, visited: false, at: null }; spots.push(s); byName.set(name, s); added++; }
+    });
+    save(); $('sheet3').hidden = true; renderAll();
+    say('図面の座標: ' + merged + ' 件に追加、' + added + ' 件を新規追加' + (bad ? '(読めない行 ' + bad + ' 行)' : '') + '。');
+  };
+
   $('exportBtn').onclick = () => {
     const blob = new Blob([JSON.stringify(spots, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -569,7 +667,7 @@
         let n = 0;
         v.forEach((s) => {
           if (s && s.name && !ids.has(s.id)) {
-            spots.push({ id: String(s.id || newId() + n), name: String(s.name), memo: String(s.memo || ''), lat: typeof s.lat === 'number' ? s.lat : null, lng: typeof s.lng === 'number' ? s.lng : null, visited: !!s.visited, at: s.at || null, route: !!s.route });
+            spots.push({ id: String(s.id || newId() + n), name: String(s.name), memo: String(s.memo || ''), lat: isNum(s.lat) ? s.lat : null, lng: isNum(s.lng) ? s.lng : null, cx: isNum(s.cx) ? s.cx : undefined, cy: isNum(s.cy) ? s.cy : undefined, visited: !!s.visited, at: s.at || null, route: !!s.route });
             n++;
           }
         });
