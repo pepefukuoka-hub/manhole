@@ -187,6 +187,8 @@
   </select>
   <label for="who" class="help">担当(提出時に記録)</label>
   <input type="text" id="who" maxlength="20" autocomplete="off" placeholder="例: 岩下" style="max-width:160px">
+  <label class="help"><input type="checkbox" id="soundChk"> 音を鳴らす</label>
+  <button type="button" id="soundTest" class="chip">音を確認</button>
 </div>
 <div class="row" id="bulkRow" hidden>
   <button id="addShown">表示中をすべて今日のルートへ</button>
@@ -293,22 +295,38 @@
   function fmt(m) { return m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + ' km'; }
 
   // 音: iPhoneのSafariは振動に対応していないため、到着は音と画面の帯で知らせる
+  let soundOn = true;
+  try { soundOn = localStorage.getItem('manhole.sound') !== '0'; } catch (e) {}
+  let wakeLock = null;
+  async function keepAwake() {
+    try { if (navigator.wakeLock && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch (e) { wakeLock = null; }
+  }
   function unlockAudio() {
-    if (audio) { if (audio.state === 'suspended') audio.resume(); return; }
-    try { const C = window.AudioContext || window.webkitAudioContext; if (C) audio = new C(); } catch (e) {}
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}   // iPhoneのサイレントスイッチでも鳴らす(対応する場合)
+    if (audio) { if (audio.state === 'suspended') audio.resume(); }
+    else { try { const C = window.AudioContext || window.webkitAudioContext; if (C) audio = new C(); } catch (e) {} }
+    keepAwake();
   }
   document.addEventListener('pointerdown', unlockAudio);
-  function beep() {
-    if (!audio) return;
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { keepAwake(); if (audio && audio.state === 'suspended') audio.resume(); } });
+
+  // 近づいた音: 明るく上がる2音(ピポッ↑)。離れた音: 低く下がる3音(ブブブ↓)。聞き分けられるよう、高さと音色を変えている
+  const SOUNDS = {
+    arrive: { type: 'sine', gain: 0.5, notes: [[880, 0], [1319, 0.2]], len: 0.22 },
+    leave: { type: 'square', gain: 0.22, notes: [[392, 0], [330, 0.18], [247, 0.36]], len: 0.16 }
+  };
+  function play(kind) {
+    if (!soundOn || !audio) return;
+    const def = SOUNDS[kind];
     try {
-      [0, 0.28].forEach((t) => {
-        const o = audio.createOscillator(), g = audio.createGain();
-        o.frequency.value = t ? 1175 : 880; o.type = 'sine';
-        g.gain.setValueAtTime(0.0001, audio.currentTime + t);
-        g.gain.exponentialRampToValueAtTime(0.4, audio.currentTime + t + 0.02);
-        g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + t + 0.22);
+      def.notes.forEach(([f, t]) => {
+        const o = audio.createOscillator(), g = audio.createGain(), at = audio.currentTime + t;
+        o.type = def.type; o.frequency.value = f;
+        g.gain.setValueAtTime(0.0001, at);
+        g.gain.exponentialRampToValueAtTime(def.gain, at + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, at + def.len);
         o.connect(g); g.connect(audio.destination);
-        o.start(audio.currentTime + t); o.stop(audio.currentTime + t + 0.25);
+        o.start(at); o.stop(at + def.len + 0.03);
       });
     } catch (e) {}
   }
@@ -449,7 +467,7 @@
         fix.onclick = () => {
           if (!me) { say('現在地を取得してから押してください。'); return; }
           s.lat = me.lat; s.lng = me.lng; s.acc = me.acc; s.visited = true; s.at = Date.now();
-          arrivalShown.add(s.id);
+          arrivalShown.add(s.id); inside.add(s.id);
           save(); renderAll(); pulseFresh(s.id); renderMarkers();
           map.setView([s.lat, s.lng], Math.max(map.getZoom(), 18));
           window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -471,11 +489,36 @@
     renderNearest();
   }
 
+  // 近くに入った地点。入ったら「近づいた音」、出たら「離れた音」を鳴らす(GPSのゆれで繰り返さないよう、出る距離は余裕をもたせる)
+  const inside = new Set();
+  function checkProximity() {
+    if (!me || me.acc > 40) return;
+    const routeOn = spots.some((s) => s.route);
+    const leaveM = ARRIVE_M * 1.5 + 5;
+    spots.forEach((s) => {
+      const p = pos(s);
+      if (!p) return;
+      const d = dist(me, p);
+      if (inside.has(s.id)) {
+        if (d > leaveM) {
+          inside.delete(s.id);
+          play('leave');
+          say(s.name + ' から離れました。');
+        }
+      } else if (d < ARRIVE_M && !s.visited && (!routeOn || s.route)) {
+        inside.add(s.id);
+        play('arrive');
+        try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}   // Androidのみ
+      }
+    });
+  }
+
   function renderNearest() {
     const routeOn = spots.some((s) => s.route);
     const pool = spots.filter((s) => !s.visited && (!routeOn || s.route));
     $('nLabel').textContent = routeOn ? '今日のルートで次の地点' : 'いちばん近い未訪問';
     if (!me) { $('nName').textContent = '現在地を取得中…'; $('nDist').textContent = ''; return; }
+    checkProximity();
     if (!pool.length) {
       $('nName').textContent = !spots.length ? 'マンホールを登録しましょう' : routeOn ? 'ルートを全部まわりました' : '全部まわりました';
       $('nDist').textContent = ''; return;
@@ -491,8 +534,6 @@
       arriveId = best.id;
       $('arriveName').textContent = best.name + (bp.est ? '(推定位置。ずれている場合があります)' : '');
       $('arrive').hidden = false;
-      beep();
-      try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}
     }
     const b = bearing(me, bp);
     const rot = heading == null ? b : (b - heading + 360) % 360;
@@ -550,7 +591,7 @@
       id = newId();
       spots.push({ id, name, memo: $('fMemo').value.trim(), lat: draft.lat, lng: draft.lng, acc: draft.acc, visited: true, at: Date.now() });
     }
-    arrivalShown.add(id);
+    arrivalShown.add(id); inside.add(id);
     const ok = save();
     $('sheet').hidden = true; renderAll(); pulseFresh(id); renderMarkers();
     map.setView([draft.lat, draft.lng], Math.max(map.getZoom(), 18));
@@ -561,7 +602,7 @@
   $('arriveClose').onclick = () => { $('arrive').hidden = true; };
   $('arriveDone').onclick = () => {
     const s = spots.find((x) => x.id === arriveId);
-    if (s) { s.visited = true; s.at = Date.now(); save(); renderAll(); pulseFresh(s.id); renderMarkers(); }
+    if (s) { s.visited = true; s.at = Date.now(); inside.add(s.id); save(); renderAll(); pulseFresh(s.id); renderMarkers(); }
     $('arrive').hidden = true;
   };
 
@@ -631,6 +672,14 @@
   $('submitBtn').onclick = submitExport;
   try { $('who').value = localStorage.getItem('manhole.who') || ''; } catch (e) {}
   $('who').onchange = () => { try { localStorage.setItem('manhole.who', $('who').value.trim()); } catch (e) {} };
+  $('soundChk').checked = soundOn;
+  $('soundChk').onchange = () => { soundOn = $('soundChk').checked; try { localStorage.setItem('manhole.sound', soundOn ? '1' : '0'); } catch (e) {} };
+  $('soundTest').onclick = () => {
+    unlockAudio();
+    if (!soundOn) { say('「音を鳴らす」がオフです。'); return; }
+    say('近づいた音のあとに、離れた音を鳴らします。聞こえない場合は、本体の音量とサイレントスイッチを確認してください。');
+    play('arrive'); setTimeout(() => play('leave'), 1200);
+  };
   $('arriveSel').value = String(ARRIVE_M);
   $('arriveSel').onchange = () => {
     ARRIVE_M = parseInt($('arriveSel').value, 10);
